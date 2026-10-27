@@ -1,0 +1,1182 @@
+---
+title: "ITS_ClusteredAnalysis"
+author: "Hannah Noel"
+format: 
+html:
+self-contained: TRUE
+editor: visual
+---
+
+## Mothur v1.48.3 and UNITE v10.0 and clustering in groups of three for stats
+
+```{r}
+library(decontam)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(phyloseq)
+library(Polychrome)
+library(tidyverse)
+library(viridis)
+library(emmeans)
+library(ggpubr)
+```
+
+```{r}
+setwd("D:/TEGU_CODE_FILE_MASTER") #working directory 
+
+theme_set(theme_bw())
+
+source("miseqR.R")
+# this file is saved in the working directory
+```
+
+## Data Import
+
+Now I will import all of the mothur data along with the metadata file:
+
+```{r}
+# Assign variables for imported data
+sharedfile = "TEGUITS2.shared"
+taxfile = "TEGUITS2.taxonomy"
+mapfile = "Tegu_FinalMetadata.csv"
+
+# Import mothur data
+mothur_ITS2 <- import_mothur(mothur_shared_file = sharedfile,
+  mothur_constaxonomy_file = taxfile)
+
+# Import sample metadata
+map <- read.csv(mapfile)
+```
+
+Convert the metadata dataframe into phyloseq format with a simple constructor. The only formatting required to merge the sample data into a phyloseq object is that the row names must match the sample names in your shared and taxonomy files.
+
+```{r}
+map <- sample_data(map)
+
+# Assign rownames to be Sample names 
+rownames(map) <- map$SampleName
+
+# Merge mothurdata object with sample metadata
+ITS_merge <- merge_phyloseq(mothur_ITS2, map)
+ITS_merge
+```
+
+```{r}
+colnames(tax_table(ITS_merge)) #these names are not helpful
+
+#change column names 
+colnames(tax_table(ITS_merge)) <- c("Kingdom", "Phylum", "Class", 
+  "Order", "Family", "Genus", "Species") #unlik 16S, I was able to get some species level resolution 
+```
+
+## Decontam
+
+Using the decontam package to remove any contamination that was introduced during the extraction and PCR process. Lets look at the library size:
+
+```{r}
+df <- as.data.frame(sample_data(ITS_merge)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(ITS_merge)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=SampleORControl)) + geom_point()
+```
+
+It looks like we were unable to get any good sequencing from the blanks, regardless if they were extraction or PCR blanks. They got removed in the trimming processes in Mothur, meaning we must proceed with a frequency method.
+
+```{r}
+#frequency default threshold 0.1 
+contamdf.freq <- isContaminant(ITS_merge, method="frequency", conc="DNAQuant")
+head(contamdf.freq)
+```
+
+We can see whether or not a sequence statistically deviates from the set threshold looking at the \$contaminant column.
+
+```{r}
+table(contamdf.freq$contaminant)
+```
+
+Out of the total 15,948 sequences, 182 have been identified as potential contaminants.
+
+```{r}
+fung.noncontam <- prune_taxa(!contamdf.freq$contaminant, ITS_merge)
+fung.noncontam
+```
+
+I now have 15,948 sequences to work with.
+
+## Graphical Analyses
+
+#### Sample Summary:
+
+Looking at the distribution of the read counts from the samples, this is very similar to what we did earlier before we performed our decontam:
+
+```{r}
+summary_df <- as.data.frame(sample_data(fung.noncontam)) #create a new data frame 
+summary_df$LibrarySize <- sample_sums(fung.noncontam)
+summary_df <- summary_df[order(summary_df$LibrarySize),]
+summary_df$Index <- seq(nrow(summary_df))
+
+png("LibrarySizeTeguITS.png", width = 800, height = 600)
+ggplot(data=summary_df, aes(x=Index, y=LibrarySize, color=Location)) + geom_point()
+dev.off()
+```
+
+So, similar to the 16S rRNA data, we see that the swabs have the lowest read counts and that the control soil and tegu decomposition impacted soils are similar to each other in read counts.
+
+```{r}
+#min, max, and mean of the sample read counts 
+smin <- min(sample_sums(fung.noncontam))
+smean <- mean(sample_sums(fung.noncontam))
+smax <- max(sample_sums(fung.noncontam))
+total_dataset_reads <- sum(sample_sums(fung.noncontam))
+```
+
+The minimum read count is 822 sequences, the maximum is 499,570 and the mean is \~149,407.
+
+#### Stacked Barplots:
+
+Reduce the phyla to remove OTUs with \>2% relative abundance.
+
+```{r}
+tegits_phylum2 <- fung.noncontam %>%
+  tax_glom(taxrank = "Phylum") %>%  
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Phylum)
+```
+
+```{r}
+#filtering into treatment groups
+
+FCon <-filter(tegits_phylum2,Location == "Control")
+FDecomp <-filter(tegits_phylum2,Location == "Tegu")
+FSwab <- filter(tegits_phylum2,Location == "Swab")
+FBlank <-filter(tegits_phylum2, Location == "Blank")
+```
+
+```{r}
+tegits_phylum2$Phylum <-as.factor(tegits_phylum2$Phylum)
+levels(tegits_phylum2$Phylum)
+```
+
+```{r}
+#making color pallete 
+set.seed(123)
+P10 <- createPalette(10, c("#FF0000", "#00FF00", "#0000FF"), range = c(30, 80))
+
+#we are then gonna sort by hue and make a matrix 
+P10 <- sortByHue(P10)
+P10 <- as.vector(t(matrix(P10, ncol=4)))
+swatch(P10)
+
+names(P10) <- levels(c(tegits_phylum2$Phylum))
+```
+
+```{r}
+FCon <- subset(FCon, Stage != 'Void ')
+FCon$Stage <- factor(FCon$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("ConPhylaTeguITS.pdf", width = 10, height = 7)
+ggplot(FCon, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P10) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+    coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+FDecomp <- subset(FDecomp, Stage != 'Void ')
+FDecomp$Stage <- factor(FDecomp$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("DecompPhylaTeguITS.pdf", width = 10, height = 7)
+ggplot(FDecomp, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P10) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+      coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+FSwab <- subset(FSwab, Stage != 'Void ')
+FSwab$Stage <- factor(FSwab$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("SwabPhylaTeguITS.pdf", width = 10, height = 7)
+ggplot(FSwab, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P10) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+        coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+Lets look at some specific phyla with their numerical abundance.
+
+```{r}
+relabun.phyla.its <- transform_sample_counts(fung.noncontam,function(x) x / sum(x))
+its_phyla <- tax_glom(relabun.phyla.its, taxrank = "Phylum", NArm = FALSE)
+phyla_sub_its <- subset_taxa(its_phyla, Phylum %in% c("p__Ascomycota","p__Basidiomycota","p__Entomophthoromycota", "p__Glomeromycota", "p__Mortierellomycota", "p__Rozellomycota"))
+phyla_its.df <- psmelt(phyla_sub_its)
+head(phyla_its.df)
+```
+
+```{r}
+Phyla_Summary_ITS <- phyla_its.df %>%
+  group_by(Location, Stage, Phylum) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Phyla_Summary_ITS)
+```
+
+```{r}
+ConPhyITS <-filter(Phyla_Summary_ITS,Location == "Control")
+DecompPhyITS <-filter(Phyla_Summary_ITS,Location == "Tegu")
+SwabPhyITS <- filter(Phyla_Summary_ITS,Location == "Swab")
+```
+
+Now on to class:
+
+```{r}
+tegits_class <- fung.noncontam %>%
+  tax_glom(taxrank = "Class") %>%  #filter by class
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Class)
+```
+
+```{r}
+#filtering into treatment groups
+
+FCon2 <-filter(tegits_class,Location == "Control")
+FDecomp2 <-filter(tegits_class,Location == "Tegu")
+FSwab2 <- filter(tegits_class,Location == "Swab")
+FBlank2 <-filter(tegits_class, Location == "Blank")
+```
+
+```{r}
+tegits_class$Class <-as.factor(tegits_class$Class)
+levels(tegits_class$Class)
+```
+
+```{r}
+#making color pallete 
+set.seed(123)
+P27 <- createPalette(27, c("#FF0000", "#00FF00", "#0000FF"), range = c(30, 80))
+
+#we are then gonna sort by hue and make a matrix 
+P27 <- sortByHue(P27)
+P27 <- as.vector(t(matrix(P27, ncol=4)))
+swatch(P27)
+
+names(P27) <- levels(c(tegits_class$Class))
+```
+
+```{r}
+FCon2 <- subset(FCon2, Stage != 'Void ')
+FCon2$Stage <- factor(FCon2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("ConClassTeguITS.pdf", width = 10, height = 7)
+ggplot(FCon2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P27) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+       coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+FDecomp2 <- subset(FDecomp2, Stage != 'Void ')
+FDecomp2$Stage <- factor(FDecomp2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("DecompClassTeguITS.pdf", width = 10, height = 7)
+ggplot(FDecomp2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P27) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+        coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+FSwab2 <- subset(FSwab2, Stage != 'Void ')
+FSwab2$Stage <- factor(FSwab2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("SwabClassTeguITS.pdf", width = 10, height = 7)
+ggplot(FSwab2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P27) +
+   theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+    coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+Looking at the specific classes by percent relative abundance
+
+```{r}
+relabun.class.its <- transform_sample_counts(fung.noncontam,function(x) x / sum(x))
+its_class <- tax_glom(relabun.class.its, taxrank = "Class", NArm = FALSE)
+class_sub_its <- subset_taxa(its_class, Class %in% c("c__Sordariomycetes","c__Tremellomycetes","c__Saccharomycetes"))
+class_its.df <- psmelt(class_sub_its)
+head(class_its.df)
+```
+
+```{r}
+Class_Summary_ITS <- class_its.df %>%
+  group_by(Location, Stage, Class) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Class_Summary_ITS)
+```
+
+```{r}
+ConClassITS <-filter(Class_Summary_ITS,Location == "Control")
+DecompClassITS <-filter(Class_Summary_ITS,Location == "Tegu")
+SwabClassITS <- filter(Class_Summary_ITS,Location == "Swab")
+Sordario <- filter(Class_Summary_ITS,Class == "c__Sordariomycetes")
+Tremello <- filter(Class_Summary_ITS,Class == "c__Tremellomycetes")
+```
+
+```{r}
+Sord.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Sordario)
+summary(Sord.mod)  
+#There is a significant difference in the mean relative abundance of sordariomycetes across sample types (p=0.0011)
+
+Sord.emm <- emmeans(Sord.mod, ~ Location)
+pairs(Sord.emm)
+#these significant differences are between the control soils and swabs (p=0.0169) and control and tegu (p=0.0010), not between swabs and decomp 
+```
+
+```{r}
+Trem.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Tremello)
+summary(Trem.mod)  
+#There is a significant difference in the mean relative abundance of tremellomycetes across sample types (p=0.0369)
+
+Trem.emm <- emmeans(Trem.mod, ~ Location)
+pairs(Trem.emm)
+#these significant differences are between the control soils and swabs (p=0.0425), not between swabs and decomp 
+```
+
+And now lets do Genus:
+
+```{r}
+tegits_genus <- fung.noncontam %>%
+  tax_glom(taxrank = "Genus") %>%  #filter by genus
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Genus)
+
+FCon3 <-filter(tegits_genus,Location == "Control")
+FDecomp3 <-filter(tegits_genus,Location == "Tegu")
+FSwab3 <- filter(tegits_genus,Location == "Swab")
+FBlank3 <-filter(tegits_genus, Location == "Blank")
+```
+
+Too much data to include, but there was an increased relative abundance of Apiotrichum and Fusarium in advaced to skeletal decay. Let us pull these genera out. Also interested in some of the insect associated genera like Pandora.
+
+```{r}
+relabun.genus.its <- transform_sample_counts(fung.noncontam,function(x) x / sum(x))
+its_genus <- tax_glom(relabun.genus.its, taxrank = "Genus", NArm = FALSE)
+genus_sub_its <- subset_taxa(its_genus, Genus %in% c("g__Apiotrichum","g__Fusarium", "g__Claroideoglomus", "g__Pandora"))
+genus_its.df <- psmelt(genus_sub_its)
+head(genus_its.df)
+```
+
+```{r}
+Genus_Summary_ITS <- genus_its.df %>%
+  group_by(Location, Stage, Genus) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Genus_Summary_ITS)
+```
+
+```{r}
+ConGenusITS <-filter(Genus_Summary_ITS,Location == "Control")
+DecompGenusITS <-filter(Genus_Summary_ITS,Location == "Tegu")
+SwabGenusITS <- filter(Genus_Summary_ITS,Location == "Swab")
+Apiot <- filter(Genus_Summary_ITS,Genus == "g__Apiotrichum")
+Fusar <- filter(Genus_Summary_ITS,Genus == "g__Fusarium")
+```
+
+```{r}
+GenusInterest <- filter(Genus_Summary_ITS, Genus == "g__Apiotrichum" | Genus == "g__Fusarium") #or argument 
+```
+
+```{r}
+GenusInterest <- subset(GenusInterest, Stage != 'Void ')
+GenusInterest$Stage <- factor(GenusInterest$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+svg("CommonFungGenera.svg", width = 8, height = 4)
+ggplot(GenusInterest, aes(x = Stage, 
+                         y = mean_abund, 
+                         fill = Genus)) +
+    geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values=c("magenta", "yellowgreen"))+
+    theme(axis.text.x = element_text(angle = 45, hjust=1, size = 12), axis.title.x = element_text(size = 14), axis.text.y = element_text(size = 12), axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))+
+   guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+  ylab("Relative Abundance" ) +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+Apiot.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Apiot)
+summary(Apiot.mod)  
+#There is not a  significant difference but do a post hoc 
+
+Apiot.emm <- emmeans(Apiot.mod, ~ Location)
+pairs(Apiot.emm)
+#not a significant different 
+```
+
+```{r}
+Fusar.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Fusar)
+summary(Fusar.mod)  
+#There is not a  significant difference but do a post hoc 
+
+Fusar.emm <- emmeans(Fusar.mod, ~ Location)
+pairs(Fusar.emm)
+#not a significant different 
+```
+
+#### Ordination (Unconstrained):
+
+First lets try a PCA:
+
+```{r}
+allits <- subset_samples(fung.noncontam, Stage != 'Void ') #this will have everything sans the blanks and removed sample
+
+allits_scale <- allits %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(allits_scale)$Stage <- factor(
+  sample_data(allits_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+#ordinnate the data 
+allits_pcoa <- ordinate(
+  physeq = allits_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+```
+
+```{r}
+#This is exploratory to see if there is any clusering of sample types 
+plot_ordination(
+  physeq = allits_scale,
+  ordination = allits_pcoa,
+  shape = "Location",
+  color = "Stage",
+  title = "PCoA of Fungal Communities") + 
+  labs(shape = "Location") +
+  scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage), 
+             alpha = 0.7, 
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5)+
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+```
+
+Distinct clustering based on the sample type.
+
+Now I want to just subset the soil:
+
+```{r}
+soilfung <- subset_samples(fung.noncontam, Source == 'Soil ')
+soilfung2 <- subset_samples(soilfung, Stage != 'Void ')
+#scale to even read depth 
+soilits_scale <- soilfung2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(soilits_scale)$Stage <- factor(
+  sample_data(soilits_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+#ordinnate the data 
+soilits_pcoa <- ordinate(
+  physeq = soilits_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+```
+
+Now do biplot with the chemical data overlaying:
+
+```{r}
+# Create the distance matrix
+soilits_dist <-phyloseq::distance(physeq = soilits_scale, method = "bray")
+
+# Create the CAP ordination
+soilits_cap_ord <- ordinate(
+  physeq = soilits_scale,
+  method = "CAP",
+  distance = soilits_dist,
+  formula = ~ pH + EC + NH4 + NO3 + C + N + CtoN)
+
+pdf("CAPTEGUITSPoster.pdf", width=9, height=6, useDingbats=FALSE)
+soilitscap_plot <- plot_ordination(
+  physeq = soilits_scale, 
+  ordination = soilits_cap_ord,
+  color = "Stage",
+  shape = "Location") + 
+  theme_classic() +
+     labs(shape = 'Treatment') +
+  scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage), alpha = 0.7, size = 6) +
+    scale_shape_manual(values = c("Tegu" = 15, "Control" = 16)) +
+ # geom_point(colour = "grey90", size = 1.5) +
+  theme(axis.text.x = element_text(size = 18), axis.title.x = element_text(size=20), axis.text.y = element_text(size = 18),axis.title.y = element_text(size = 20), plot.title = element_text(size = 24))
+  
+# add metadata as arrows
+Soilits_arrows <- vegan::scores(soilits_cap_ord, display = "bp")
+
+#add labels and create dataframe
+Soilits_arrows_df <- data.frame(labels = rownames(Soilits_arrows), Soilits_arrows)
+
+# create arrow aesthetics
+ar_aesthetics <- aes(xend = CAP1, yend = CAP2, x = 0, y = 0, shape = NULL, color = NULL, label = labels)
+lb_aesthetics <- aes (x = 1.2 * CAP1, y = 1.5 * CAP2, shape = NULL, color = NULL, label = labels)
+ar_head = arrow(length = unit (0.02, "npc"))
+
+# overlay arrows
+soilitscap_plot+
+  geom_segment(mapping = ar_aesthetics, size = 1.25, data = Soilits_arrows_df, color = "black", arrow = ar_head) + 
+  geom_label(mapping = lb_aesthetics, size = 4, data = Soilits_arrows_df, color= "black", show.legend = FALSE)
+dev.off()
+```
+
+Then lets look at each sample type in respect to stage of decomposition.
+
+```{r}
+decomp_fung <- subset_samples(fung.noncontam, Location == 'Tegu')
+decomp_fung2 <- subset_samples(decomp_fung, Stage != 'Void ')
+
+decompits_scale <- decomp_fung2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(decompits_scale)$Stage <- factor(
+  sample_data(decompits_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+decompits_pcoa <- ordinate(
+  physeq = decompits_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAdecompITS.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = decompits_scale,
+  ordination = decompits_pcoa,
+  color = "Stage") + 
+      theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 15,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+dev.off()
+```
+
+There does seem to be a trend dependent on the stage of decomposition.
+
+```{r}
+con_fung <- subset_samples(fung.noncontam, Location == 'Control')
+con_fung2 <- subset_samples(con_fung, Stage != 'Void ')
+
+conits_scale <- con_fung2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(conits_scale)$Stage <- factor(
+  sample_data(conits_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+conits_pcoa <- ordinate(
+  physeq = conits_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAconITS.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = conits_scale,
+  ordination = conits_pcoa,
+  color = "Stage") + 
+       theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 16,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+dev.off()
+```
+
+No apparent clustering in controls.
+
+```{r}
+swab_fung <- subset_samples(fung.noncontam, Location == 'Swab')
+swab_fung2 <- subset_samples(swab_fung, Stage != 'Void ')
+
+swabits_scale <- swab_fung2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(swabits_scale)$Stage <- factor(
+  sample_data(swabits_scale)$Stage, 
+levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+swabits_pcoa <- ordinate(
+  physeq = swabits_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAswabITS.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = swabits_scale,
+  ordination = swabits_pcoa,
+  color = "Stage") +
+  theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 17,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+dev.off()
+```
+
+Really defined clustering dependent on decomposition stage.
+
+**PERMANOVA:**
+
+Testing the hypothesis that the three different sample locations (Control soils, Tegu decomp soils, and skin swabs) have different centroids.
+
+```{r}
+set.seed(3)
+
+# Calculate bray curtis distance matrix with all_scale because it has all samples sans the blank 
+allits_bray <- phyloseq::distance(allits_scale, method = "bray") 
+
+# make a data frame from the sample_data and have to use all which is the data with blank removed
+allitsdf <- data.frame(sample_data(allits))
+
+# Adonis test
+adonis(allits_bray ~ Location, data = allitsdf)
+
+# Homogeneity of dispersion test
+betaits_all <- betadisper(allits_bray, allitsdf$Location)
+permutest(betaits_all)
+```
+
+It looks like there is a differences in community centroids based on sampling location. However, I want to do this for just the soil as well.
+
+```{r}
+set.seed(3)
+
+# Calculate bray curtis distance matrix with soil_scale because it has only the soil samples
+soilits_bray <- phyloseq::distance(soilits_scale, method = "bray") 
+
+# make a data frame from the sample_data and have to use which is the data with just soils 
+soilitsdf <- data.frame(sample_data(soilfung2))
+
+# Adonis test
+adonis(soilits_bray ~ Location, data = soilitsdf)
+
+# Homogeneity of dispersion test
+betaitssoil <- betadisper(soilits_bray, soilitsdf$Location)
+permutest(betaitssoil)
+```
+
+And there is still a significant difference in between the soil communities.
+
+#### Alpha Diversity:
+
+First, I must perform rarefaction, although rarefaction has its issues, this needs to be done for these metrics.
+
+```{r}
+min_ITS_lib <- min(sample_sums(allits))
+#the minimum library is 822 with all samples
+
+min_ITS_lib2 <- min(sample_sums(soilfung2))
+#if we don't include the swabs, this makes it so the min library size is 17,289
+
+#I also want to seperate out just the swabs 
+skinfung <- subset_samples(fung.noncontam, Source == 'Skin')
+skinfung2 <- subset_samples(skinfung, Stage != 'Void ')
+
+min_lib3 <- min(sample_sums(skinfung2))
+#okay, so same as min library one, 822, which means swabs must be processed seperately 
+```
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(fung.noncontam)
+
+OTUtabITS <- otu_table(fung.noncontam)
+class(OTUtabITS) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+OTUtabITS <- t(OTUtabITS) # transpose observations to rows
+```
+
+```{r}
+rareITS <- rarecurve(OTUtabITS, step = 100)
+```
+
+```{r}
+#piping data from rarecurve into ggplot 
+map_dfr(rareITS, bind_rows) %>%
+  bind_cols(SampleID = rownames(OTUtabITS),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_ITS_lib, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("OriginalrareITSplot.pdf", width=8, height=5)
+```
+
+As we can see, this needs to be redone with the soil and the skin swab libraries separate. Time to rarefy soil samples:
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(soilfung2)
+soilitstab <- otu_table(soilfung2)
+class(soilitstab) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+soilitstab <- t(soilitstab) # transpose observations to rows
+```
+
+```{r}
+soilitsrare <- rarecurve(soilitstab, step = 100)
+```
+
+```{r}
+#piping data from rarecurve into ggplot 
+map_dfr(soilitsrare, bind_rows) %>%
+  bind_cols(SampleID = rownames(soilitstab),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_ITS_lib2, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("raresoilITSplot.pdf", width=8, height=5)
+```
+
+```{r}
+# Initialize matrices to store richness and evenness estimates for all of the samples
+soilITS <- subset_samples(soilfung, Stage != 'Void ')
+
+nITSsamp = nsamples(soilITS)
+ITStrials = 100
+
+fungrichness <- matrix(nrow = nITSsamp, ncol = ITStrials)
+row.names(fungrichness) <- sample_names(soilITS)
+
+fungevenness <- matrix(nrow = nITSsamp, ncol = ITStrials)
+row.names(fungevenness) <- sample_names(soilITS)
+
+fungshanmeas <- matrix(nrow = nITSsamp, ncol = ITStrials)
+row.names(fungshanmeas) <- sample_names(soilITS)
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(4)
+
+for (i in 1:100) {
+  # Subsample
+  ri <- rarefy_even_depth(soilITS, sample.size = min_ITS_lib2, verbose = FALSE, replace = TRUE)
+  
+  # Calculate richness
+  richfung <- as.numeric(as.matrix(estimate_richness(ri, measures = "Observed")))
+  fungrichness[ ,i] <- richfung
+  
+  # Calculate evenness
+  evenfung <- as.numeric(as.matrix(estimate_richness(ri, measures = "InvSimpson")))
+  fungevenness[ ,i] <- evenfung
+
+  #calc Shannon
+  Shannonfung <- as.numeric(as.matrix(estimate_richness(ri, measures = "Shannon")))
+  fungshanmeas[ ,i] <- Shannonfung
+}
+
+# Create a new dataframe to hold the means and standard deviations of richness estimates
+SampleID <- row.names(fungrichness)
+mean <- apply(fungrichness, 1, mean)
+sd <- apply(fungrichness, 1, sd)
+measure <- rep("Richness", nITSsamp)
+rich_stats_soilITS <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(fungevenness)
+mean <- apply(fungevenness, 1, mean)
+sd <- apply(fungevenness, 1, sd)
+measure <- rep("Inverse Simpson", nITSsamp)
+even_stats_soilITS <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(fungshanmeas)
+mean <- apply(fungshanmeas, 1, mean)
+sd <- apply(fungshanmeas, 1, sd)
+measure <- rep("Shannon", nITSsamp)
+shan_stats_soilITS <- data.frame(SampleID, mean, sd, measure)
+```
+
+```{r}
+#Now we will combine our estimates for soil richness and evenness into one dataframe
+soilITSalpha <- rbind(rich_stats_soilITS, even_stats_soilITS, shan_stats_soilITS)
+
+#add metadata 
+
+k <- data.frame(sample_data(soilITS))
+colnames(k)[2] <- "SampleID"
+adivsoilITS <- merge(soilITSalpha, k, by = "SampleID")
+```
+
+```{r}
+#filter out the data for this test 
+ObRichFSl <-filter(adivsoilITS,measure == "Richness")
+ShannonFSl <-filter(adivsoilITS,measure == "Shannon")
+InvSimpFSl <- filter(adivsoilITS,measure == "Inverse Simpson")
+```
+
+```{r}
+ObRichFSl$Stage <- factor(ObRichFSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ObRichFSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Observed Richness") +
+  xlab("Decomposition Stage") +
+   scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+   stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 930) +
+    theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSObsSoilRichness.pdf", width=8, height=5)
+```
+
+```{r}
+FSlrichaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = ObRichFSl)
+summary(FSlrichaov) 
+#There is no significant difference in observed richness based on decomposition stage 
+```
+
+```{r}
+compare_means(mean ~ Location, ObRichFSl, method = "t.test", paired = FALSE, group.by = "Stage")
+#no significant diffs beased on sample type, holm's adjust
+```
+
+```{r}
+ShannonFSl$Stage <- factor(ShannonFSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ShannonFSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Shannon Diversity") +
+   xlab("Decomposition Stage") +
+  scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+     coord_cartesian(ylim = c(0, 8)) +
+   stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 8) +
+    theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSShannonSoil.pdf", width=8, height=5)
+```
+
+```{r}
+FSlshanaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = ShannonFSl)
+summary(FSlshanaov) 
+#There is no significant difference in shannon diversity based on sample type
+```
+
+```{r}
+compare_means(mean ~ Location, ShannonFSl, method = "t.test", paired = FALSE, group.by = "Stage")
+#diff advanced III decomposition stage with p = 0.0098 **, holm's adjustment
+```
+
+```{r}
+InvSimpFSl$Stage <- factor(InvSimpFSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = InvSimpFSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Inverse Simpson") +
+  xlab("Decomposition Stage") +
+  scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+   coord_cartesian(ylim = c(0, 350)) +
+    stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 350) +
+    theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSInvSimpsonSoil.pdf", width=8, height=5)
+```
+
+```{r}
+FSlinvsimaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = InvSimpFSl)
+summary(FSlinvsimaov) 
+#There is no significant difference in Inverse Simpson diversity based on sample type 
+```
+
+```{r}
+compare_means(mean ~ Location, InvSimpFSl, method = "t.test", paired = FALSE, group.by = "Stage")
+#no diff based on decomposition stage, holm adjust
+```
+
+Now I need to do a separate rarefaction for the skin swabs.
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(skinfung2)
+skinitstab <- otu_table(skinfung2)
+class(skinitstab) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+skinitstab <- t(skinitstab) # transpose observations to rows
+```
+
+```{r}
+skinITSrare <- rarecurve(skinitstab, step = 100)
+```
+
+```{r}
+#piping data from rarecurve into ggplot 
+map_dfr(skinITSrare, bind_rows) %>%
+  bind_cols(SampleID = rownames(skinitstab),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_lib3, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("rareskinITSplot.pdf", width=8, height=5)
+```
+
+```{r}
+# Initialize matrices to store richness and evenness estimates for all of the samples
+skinITS <- subset_samples(skinfung, Stage != 'Void ')
+
+nskinfsamp = nsamples(skinITS)
+skinftrials = 100
+
+skinfrichness <- matrix(nrow = nskinfsamp, ncol = skinftrials)
+row.names(skinfrichness) <- sample_names(skinITS)
+
+skinfevenness <- matrix(nrow = nskinfsamp, ncol = skinftrials)
+row.names(skinfevenness) <- sample_names(skinITS)
+
+skinfshanmeas <- matrix(nrow = nskinfsamp, ncol = skinftrials)
+row.names(skinfshanmeas) <- sample_names(skinITS)
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(5)
+
+for (i in 1:100) {
+  # Subsample
+  rsf <- rarefy_even_depth(skinITS, sample.size = min_lib3, verbose = FALSE, replace = TRUE)
+  
+  # Calculate richness
+  richfungsk <- as.numeric(as.matrix(estimate_richness(rsf, measures = "Observed")))
+  skinfrichness[ ,i] <- richfungsk
+  
+  # Calculate evenness
+  evenfungsk <- as.numeric(as.matrix(estimate_richness(rsf, measures = "InvSimpson")))
+  skinfevenness[ ,i] <- evenfungsk
+
+  #calc Shannon
+  Shannonfungsk <- as.numeric(as.matrix(estimate_richness(rsf, measures = "Shannon")))
+  skinfshanmeas[ ,i] <- Shannonfungsk
+}
+
+# Create a new dataframe to hold the means and standard deviations of richness estimates
+SampleID <- row.names(skinfrichness)
+mean <- apply(skinfrichness, 1, mean)
+sd <- apply(skinfrichness, 1, sd)
+measure <- rep("Richness", nskinfsamp)
+rich_stats_skinITS <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(skinfevenness)
+mean <- apply(skinfevenness, 1, mean)
+sd <- apply(skinfevenness, 1, sd)
+measure <- rep("Inverse Simpson", nskinfsamp)
+even_stats_skinITS <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(skinfshanmeas)
+mean <- apply(skinfshanmeas, 1, mean)
+sd <- apply(skinfshanmeas, 1, sd)
+measure <- rep("Shannon", nskinfsamp)
+shan_stats_skinITS <- data.frame(SampleID, mean, sd, measure)
+```
+
+```{r}
+#Now we will combine our estimates for soil richness and evenness into one dataframe
+
+skinITSalpha <- rbind(rich_stats_skinITS, even_stats_skinITS, shan_stats_skinITS)
+
+#add metadata 
+
+w <- data.frame(sample_data(skinITS))
+colnames(w)[2] <- "SampleID"
+adivskinITS <- merge(skinITSalpha, w, by = "SampleID")
+```
+
+```{r}
+ObRichSkITS <-filter(adivskinITS,measure == "Richness")
+ShannonSkITS <-filter(adivskinITS,measure == "Shannon")
+InvSimpSkITS <- filter(adivskinITS,measure == "Inverse Simpson")
+```
+
+```{r}
+ObRichSkITS$Stage <- factor(ObRichSkITS$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ObRichSkITS, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Observed Richness") +
+  xlab("Decomposition Stage") +
+  scale_fill_manual(values = "goldenrod") +
+    theme_classic()+
+ theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSObsSkinRichness.pdf", width=8, height=5)
+```
+
+```{r}
+skfrichaov <- aov(mean~Stage, data=ObRichSkITS)
+summary(skfrichaov)
+
+#significant difference accross time points (p=0.000156)
+```
+
+```{r}
+ShannonSkITS$Stage <- factor(ShannonSkITS$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ShannonSkITS, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Shannon Diversity") +
+   xlab("Decomposition Stage") +
+   scale_fill_manual(values = "goldenrod") +
+    coord_cartesian(ylim=c(0,5)) +
+    theme_classic() +
+  theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSShannonSkin.pdf", width=8, height=5)
+```
+
+```{r}
+skfshanaov <- aov(mean~Stage, data=ShannonSkITS)
+summary(skfshanaov)
+
+#significant across stages (p=1.9e-5)
+```
+
+```{r}
+InvSimpSkITS$Stage <- factor(InvSimpSkITS$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = InvSimpSkITS, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Inverse Simpson") +
+  xlab("Decomposition Stage") +
+   scale_fill_manual(values = "goldenrod") +
+    theme_classic() +
+  theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("ITSInvSimpsonSkin.pdf", width=8, height=5)
+```
+
+```{r}
+skfsimpaov <- aov(mean~Stage, data=InvSimpSkITS)
+summary(skfsimpaov)
+
+#significant difference (p=0.0214)
+```

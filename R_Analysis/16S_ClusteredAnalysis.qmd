@@ -1,0 +1,1174 @@
+---
+title: "16S_ClusteredAnalysis"
+author: "Hannah Noel"
+format:
+html:
+self-contained: TRUE
+editor: visual
+---
+
+## Mothur v1.48.3 and SILVA v138.2 and clustering into groups of three for the stats
+
+```{r}
+library(decontam)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(phyloseq)
+library(Polychrome)
+library(tidyverse)
+library(viridis)
+library(emmeans)
+library(ggpubr)
+```
+
+```{r}
+setwd("D:/TEGU_CODE_FILE_MASTER") #working directory 
+
+theme_set(theme_bw())
+
+source("miseqR.R")
+# this file is saved in the working directory
+```
+
+## Data Import
+
+Now I will import all of the mothur data along with the updated metadata file:
+
+```{r}
+# Assign variables for imported data
+sharedfile = "tegu16s2.shared"
+taxfile = "tegu16s2.taxonomy"
+mapfile = "Tegu_FinalMetadata.csv"
+
+# Import mothur data
+mothur_16s2 <- import_mothur(mothur_shared_file = sharedfile,
+  mothur_constaxonomy_file = taxfile)
+
+# Import sample metadata
+map <- read.csv(mapfile)
+```
+
+Convert the metadata dataframe into phyloseq format with a simple constructor. The only formatting required to merge the sample data into a phyloseq object is that the row names must match the sample names in your shared and taxonomy files.
+
+```{r}
+map <- sample_data(map)
+
+# Assign rownames to be Sample names 
+rownames(map) <- map$SampleName
+
+# Merge mothurdata object with sample metadata
+Bact_merge <- merge_phyloseq(mothur_16s2, map)
+Bact_merge
+```
+
+```{r}
+colnames(tax_table(Bact_merge)) #these names are not helpful
+
+#change column names 
+colnames(tax_table(Bact_merge)) <- c("Kingdom", "Phylum", "Class", 
+  "Order", "Family", "Genus")
+```
+
+## Decontam
+
+Using the decontam package to remove any contamination that was introduced during the extraction and PCR process. Lets look at the library size:
+
+```{r}
+df <- as.data.frame(sample_data(Bact_merge)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(Bact_merge)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=SampleORControl)) + geom_point()
+```
+
+The primary true samples fall within 10,000-40,000 reads, with fewer reads in the control. However, I started with three controls (2 extraction blanks and a PCR Blank). One of the extractions blanks and the PCR blanks initially had low read counts and were poorly sequenced. These resulted on getting trimmed completely from the data set, so we are working with one blank alone.
+
+I am going to examine the frequency method to remove contaminants. The frequency method uses the distribution frequency of of each sequence feature as a function of the DNA input and the prevalence method compares presence and absence between the controls and true samples. Lets look at them separately.
+
+```{r}
+#frequency default threshold 0.1 
+contamdf.freq <- isContaminant(Bact_merge, method="frequency", conc="DNAQuant")
+head(contamdf.freq)
+```
+
+We can see whether or not a sequence statistically deviates from the set threshold looking at the \$contaminant column.
+
+```{r}
+table(contamdf.freq$contaminant)
+```
+
+Out of the total 34,610 sequences, 168 have been identified as potential contaminants.
+
+```{r}
+bact.noncontam <- prune_taxa(!contamdf.freq$contaminant, Bact_merge)
+bact.noncontam
+```
+
+We now have 34,442 sequences to work with.
+
+## Graphical Analyses
+
+#### Sample Summary:
+
+Looking at the distribution of the read counts from the samples, this is very similar to what we did earlier before we performed our decontam:
+
+```{r}
+summary_df <- as.data.frame(sample_data(bact.noncontam)) #create a new data frame 
+summary_df$LibrarySize <- sample_sums(bact.noncontam)
+summary_df <- summary_df[order(summary_df$LibrarySize),]
+summary_df$Index <- seq(nrow(summary_df))
+
+png("LibrarySizeTegu16s.png", width = 800, height = 600)
+ggplot(data=summary_df, aes(x=Index, y=LibrarySize, color=Location)) + geom_point()
+dev.off()
+```
+
+We see that the swabs have the lowest read counts and that the controls and tegu soils are similar to each other in read counts.
+
+```{r}
+#min, max, and mean of the sample read counts 
+smin <- min(sample_sums(bact.noncontam))
+smean <- mean(sample_sums(bact.noncontam))
+smax <- max(sample_sums(bact.noncontam))
+total_dataset_reads <- sum(sample_sums(bact.noncontam))
+```
+
+The minimum read count is 2 sequences, the maximum is 459,532 and the mean is \~168,089
+
+#### Stacked Barplots:
+
+Reduce the phyla to remove the less than 2% reads.
+
+```{r}
+teg16s_phylum2 <- bact.noncontam %>%
+  tax_glom(taxrank = "Phylum") %>%  
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Phylum)
+```
+
+```{r}
+#filtering into treatment groups
+
+BCon <-filter(teg16s_phylum2,Location == "Control")
+BDecomp <-filter(teg16s_phylum2,Location == "Tegu")
+BSwab<- filter(teg16s_phylum2,Location == "Swab")
+```
+
+```{r}
+teg16s_phylum2$Phylum <-as.factor(teg16s_phylum2$Phylum)
+levels(teg16s_phylum2$Phylum)
+```
+
+```{r}
+#making color pallete 
+set.seed(13)
+P14 <- createPalette(14, c("#FF0000", "#00FF00", "#0000FF"), range = c(30, 80))
+
+#we are then gonna sort by hue and make a matrix 
+P14 <- sortByHue(P14)
+P14 <- as.vector(t(matrix(P14, ncol=4)))
+swatch(P14)
+
+names(P14) <- levels(c(teg16s_phylum2$Phylum))
+
+```
+
+```{r}
+BCon <- subset(BCon, Stage != 'Void ')
+BCon$Stage <- factor(BCon$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("ConPhylaTegu16S.pdf", width = 10, height = 7)
+ggplot(BCon, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P14) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+  coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+BDecomp <- subset(BDecomp, Stage != 'Void ')
+BDecomp$Stage <- factor(BDecomp$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("DecompPhylaTegu16S.pdf", width = 10, height = 7)
+ggplot(BDecomp, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P14) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+   coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+BSwab <- subset(BSwab, Stage != 'Void ')
+BSwab$Stage <- factor(BSwab$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("SwabPhylaTegu16S.pdf", width = 10, height = 7)
+ggplot(BSwab, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P14) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+   coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+Lets look at some specific phyla with their numerical abundance.
+
+```{r}
+relabun.phyla <- transform_sample_counts(bact.noncontam,function(x) x / sum(x))
+ps_phyla <- tax_glom(relabun.phyla, taxrank = "Phylum", NArm = FALSE)
+phyla_sub <- subset_taxa(ps_phyla, Phylum %in% c("Acidobacteriota","Actinomycetota","Bacillota", "Bacteroidota","Gemmatimonadota", "Myxococcota", "Pseudomonadota"))
+phyla_sub.df <- psmelt(phyla_sub)
+head(phyla_sub.df)
+```
+
+```{r}
+Bact_Phyla_Summary <- phyla_sub.df %>%
+  group_by(Location, Stage, Phylum) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Bact_Phyla_Summary)
+```
+
+```{r}
+#filter by sample type 
+ConPhy <-filter(Phyla_Summary,Location == "Control")
+DecompPhy <-filter(Phyla_Summary,Location == "Tegu")
+SwabPhy <- filter(Phyla_Summary,Location == "Swab")
+```
+
+Now on to class:
+
+```{r}
+teg16s_class <- bact.noncontam %>%
+  tax_glom(taxrank = "Class") %>%  #filter by class
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Class)
+```
+
+```{r}
+#filtering into treatment groups
+
+BCon2 <-filter(teg16s_class,Location == "Control")
+BDecomp2 <-filter(teg16s_class,Location == "Tegu")
+BSwab2 <- filter(teg16s_class,Location == "Swab")
+```
+
+```{r}
+teg16s_class$Class <-as.factor(teg16s_class$Class)
+levels(teg16s_class$Class)
+```
+
+```{r}
+#making color pallete 
+set.seed(123)
+P22 <- createPalette(22, c("#FF0000", "#00FF00", "#0000FF"), range = c(35, 90))
+
+#we are then gonna sort by hue and make a matrix 
+P22 <- sortByHue(P22)
+P22 <- as.vector(t(matrix(P22, ncol=4)))
+swatch(P22)
+
+names(P22) <- levels(c(teg16s_class$Class))
+```
+
+```{r}
+BCon2 <- subset(BCon2, Stage != 'Void ')
+BCon2$Stage <- factor(BCon2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("ConClassTegu16S.pdf", width = 10, height = 7)
+  ggplot(BCon2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P22) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+       coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+BDecomp2 <- subset(BDecomp2, Stage != 'Void ')
+BDecomp2$Stage <- factor(BDecomp2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("DecompClassTegu16S.pdf", width = 10, height = 7)
+  ggplot(BDecomp2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P22) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+    coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+BSwab2 <- subset(BSwab2, Stage != 'Void ')
+BSwab2$Stage <- factor(BSwab2$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+pdf("SwabClassTegu16S.pdf", width = 10, height = 7)
+ggplot(BSwab2, aes(x = Stage, 
+                         y = Abundance/3, 
+                         fill = Class)) + 
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = P22) +
+ theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+    coord_cartesian(ylim = c(0, 1)) +
+  ylab("Relative Abundance (>2%)") +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+Looking at the specific classes by percent relative abundance
+
+```{r}
+relabun.class <- transform_sample_counts(bact.noncontam,function(x) x / sum(x))
+ps_class <- tax_glom(relabun.class, taxrank = "Class", NArm = FALSE)
+class_sub <- subset_taxa(ps_class, Class %in% c("Actinobacteria","Bacteroidia","Gammaproteobacteria","Clostridia"))
+class_sub.df <- psmelt(class_sub)
+head(class_sub.df)
+```
+
+```{r}
+Bact_Class_Summary <- class_sub.df %>%
+  group_by(Location, Stage, Class) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Bact_Class_Summary)
+```
+
+```{r}
+ConClass <-filter(Bact_Class_Summary,Location == "Control")
+DecompClass <-filter(Bact_Class_Summary,Location == "Tegu")
+SwabClass <- filter(Bact_Class_Summary,Location == "Swab")
+```
+
+And now lets do Genus:
+
+```{r}
+teg16s_genus <- bact.noncontam %>%
+  tax_glom(taxrank = "Genus") %>%  #filter by genus
+  transform_sample_counts(function(x) {x/sum(x)} ) %>%  
+  psmelt() %>% 
+   filter(Abundance > 0.02) %>%    # Filter out low abundance taxa
+  arrange(Genus)
+
+BCon3 <-filter(teg16s_genus,Location == "Control")
+BDecomp3 <-filter(teg16s_genus,Location == "Tegu")
+BSwab3 <- filter(teg16s_genus,Location == "Swab")
+```
+
+Too much data to include, but there was an increased relative abundance of the fly associated Ignatzschineria in the swabs in the active decomposition, which is associated with flies that did not show up in soils. Also Oblitimonas found in more advanced stages, might break down carbohydrates. Let us pull these genera out.
+
+```{r}
+relabun.genus.16s <- transform_sample_counts(bact.noncontam,function(x) x / sum(x))
+bact_genus <- tax_glom(relabun.genus.16s, taxrank = "Genus", NArm = FALSE)
+genus_sub_16s <- subset_taxa(bact_genus, Genus %in% c("Ignatzschineria", "Oblitimonas"))
+genus_16s.df <- psmelt(genus_sub_16s)
+head(genus_16s.df)
+```
+
+```{r}
+Bact_Genus_Summary_16S <- genus_16s.df %>%
+  group_by(Location, Stage, Genus) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+head(Bact_Genus_Summary_16S)
+
+ConGenus <-filter(Bact_Genus_Summary_16S,Location == "Control")
+DecompGenus <-filter(Bact_Genus_Summary_16S,Location == "Tegu")
+SwabGenus <- filter(Bact_Genus_Summary_16S,Location == "Swab")
+Ignatz <- filter(Bact_Genus_Summary_16S,Genus == "Ignatzschineria")
+Oblit <- filter(Bact_Genus_Summary_16S,Genus == "Oblitimonas")
+```
+
+```{r}
+SwabGenus <- subset(SwabGenus, Stage != 'Void ')
+SwabGenus$Stage <- factor(SwabGenus$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+svg("CommonBactGenera.svg", width = 8, height = 4)
+ggplot(SwabGenus, aes(x = Stage, 
+                         y = mean_abund, 
+                         fill = Genus)) + 
+  scale_fill_manual(values=c("#E69F00", "navy"))+
+  geom_bar(stat = "identity", width = 0.6) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 12), axis.title.x = element_text(size = 14), axis.text.y = element_text(size = 12), axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))+
+  guides(fill = guide_legend(reverse = FALSE, 
+                             keywidth = 1.5, 
+                             keyheight = 1.5,
+                             ncol = 1,
+                            legend.text = element_text(size=14))) +
+  ylab("Relative Abundance" ) +
+  xlab ("Decomposition Stage") 
+dev.off()
+```
+
+```{r}
+Ignatz <- subset(Ignatz, Location != 'Blank ')
+Ignatz.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Ignatz)
+summary(Ignatz.mod)  
+#There is a  significant difference depending on location (p=0.0161)
+#do a post hoc  
+Ignatz.emm <- emmeans(Ignatz.mod, ~ Location)
+pairs(Ignatz.emm)
+#significant difference between control and swab (p=0.03) and swab and tegu (p=0.031) but not control and tegu 
+```
+
+```{r}
+Oblit <- subset(Oblit, Location != 'Blank ')
+Oblit.mod <- aov(mean_abund~factor(Location)+Error(factor(Stage)), data = Oblit)
+summary(Oblit.mod)  
+#There is a  significant difference depending on location (p=0.00307)
+#do a post hoc
+Oblit.emm <- emmeans(Oblit.mod, ~ Location)
+pairs(Oblit.emm)
+#significant difference between control and swab (p=0.007) and swab and tegu (p=0.0074) but not control and tegu 
+```
+
+#### Ordination (Unconstrained):
+
+Lets try a PCoA:
+
+```{r}
+all16s <- subset_samples(bact.noncontam, Stage != 'Void ') #this will have everything sans the blank and removed sample 
+
+all16_scale <- all16s %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(all16_scale)$Stage <- factor(
+  sample_data(all16_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+#ordinnate the data 
+all16_pcoa <- ordinate(
+  physeq = all16_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+```
+
+```{r}
+#This is exploratory to see if there is any clusering of sample types 
+plot_ordination(
+  physeq = all16_scale,
+  ordination = all16_pcoa,
+  shape = "Location",
+  color = "Stage",
+  title = "PCoA of Bacterial Communities") + 
+  labs(shape = "Location") +
+  scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage), 
+             alpha = 0.7, 
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5)+
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+```
+
+Distinct clustering with the soils more similar to each other than they are to the swabs, but the two soil types are still different.
+
+Now I want to just subset the soil:
+
+```{r}
+soilbact <- subset_samples(bact.noncontam, Source == 'Soil ')
+soilbact2 <- subset_samples(soilbact, Stage != 'Void ')
+#scale to even read depth 
+soil16_scale <- soilbact2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(soil16_scale)$Stage <- factor(
+  sample_data(soil16_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+#ordinnate the data 
+soil16_pcoa <- ordinate(
+  physeq = soil16_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+```
+
+Now do biplot with the chemical data overlaying:
+
+```{r}
+# Create the distance matrix
+soil16_dist <-phyloseq::distance(physeq = soil16_scale, method = "bray")
+
+# Create the CAP ordination
+soil16_cap_ord <- ordinate(
+  physeq = soil16_scale,
+  method = "CAP",
+  distance = soil16_dist,
+  formula = ~ pH + EC + NH4 + NO3 + C + N + CtoN)
+
+pdf("CAPTEGU16sPoster.pdf", width=9, height=6, useDingbats=FALSE)
+soil16cap_plot <- plot_ordination(
+  physeq = soil16_scale, 
+  ordination = soil16_cap_ord,
+  color = "Stage",
+  shape = "Location"
+  ) + 
+    theme_classic() +
+   labs(shape = 'Treatment') +
+  scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage), alpha = 0.7, size = 6) +
+    scale_shape_manual(values = c("Tegu" = 15, "Control" = 16)) +
+  theme(axis.text.x = element_text(size = 18), axis.title.x = element_text(size=20), axis.text.y = element_text(size = 18),axis.title.y = element_text(size = 20), plot.title = element_text(size = 24)) 
+  
+# add metadata as arrows
+Soil16_arrows <- vegan::scores(soil16_cap_ord, display = "bp")
+
+#add labels and create dataframe
+Soil16_arrows_df <- data.frame(labels = rownames(Soil16_arrows), Soil16_arrows)
+
+# create arrow aesthetics
+ar_aesthetics <- aes(xend = CAP1, yend = CAP2, x = 0, y = 0, shape = NULL, color = NULL, label = labels)
+lb_aesthetics <- aes (x = 1.2 * CAP1, y = 1.5 * CAP2, shape = NULL, color = NULL, label = labels)
+ar_head = arrow(length = unit (0.02, "npc"))
+
+# overlay arrows
+soil16cap_plot+
+  geom_segment(mapping = ar_aesthetics, size = 1.25, data = Soil16_arrows_df, color = "black", arrow = ar_head) + 
+  geom_label(mapping = lb_aesthetics, size = 4, data = Soil16_arrows_df, color= "black", show.legend = FALSE)
+dev.off()
+```
+
+Then lets look at each sample type in respect to stage of decomposition.
+
+```{r}
+decomp_bact <- subset_samples(bact.noncontam, Location == 'Tegu')
+decomp_bact2 <- subset_samples(decomp_bact, Stage != 'Void ')
+
+decomp16_scale <- decomp_bact2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(decomp16_scale)$Stage <- factor(
+  sample_data(decomp16_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+decomp16_pcoa <- ordinate(
+  physeq = decomp16_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAdecomp16S.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = decomp16_scale,
+  ordination = decomp16_pcoa,
+  color = "Stage") + 
+    theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 15,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20)) 
+dev.off()
+```
+
+Seems to have some clustering based on timepoint.
+
+```{r}
+con_bact <- subset_samples(bact.noncontam, Location == 'Control')
+con_bact2 <- subset_samples(con_bact, Stage != 'Void ')
+
+con16_scale <- con_bact2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(con16_scale)$Stage <- factor(
+  sample_data(con16_scale)$Stage, 
+  levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+con16_pcoa <- ordinate(
+  physeq = con16_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAcon16S.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = con16_scale,
+  ordination = con16_pcoa,
+  color = "Stage") + 
+    theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 16,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+dev.off()
+```
+
+No super distinct trends
+
+```{r}
+swab_bact <- subset_samples(bact.noncontam, Location == 'Swab')
+swab_bact2 <- subset_samples(swab_bact, Stage != 'Void ')
+
+swab16_scale <- swab_bact2 %>%
+  scale_reads(round = "round") #this is from the miseqR.R file
+
+#comparing sample types from different decomposition stages
+sample_data(swab16_scale)$Stage <- factor(
+  sample_data(swab16_scale)$Stage, 
+levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+swab16_pcoa <- ordinate(
+  physeq = swab16_scale, 
+ method = "PCoA", 
+  distance = "bray"
+)
+
+pdf("PCoAswab16S.pdf", width=8, height=5, useDingbats=FALSE)
+plot_ordination(
+  physeq = swab16_scale,
+  ordination = swab16_pcoa,
+  color = "Stage") + 
+    theme_classic() +
+ scale_color_viridis(discrete = TRUE, option = "C")+
+  scale_fill_viridis(discrete = TRUE) +
+  geom_point(aes(color = Stage),
+             shape = 17,
+             alpha = 0.7,
+             size = 5) +
+  geom_point(colour = "grey90", 
+             size = 1.5) +
+  theme(axis.text.x = element_text(size = 12), axis.title.x = element_text(size=14), axis.text.y = element_text(size = 12),axis.title.y = element_text(size = 14), plot.title = element_text(size = 20))
+dev.off()
+```
+
+Very defined separation based on the stage of decomposition.
+
+#### **PERMANOVA:**
+
+Testing the hypothesis that the three different sample locations (Control soils, Tegu decomp soils, and skin swabs) have different centroids.
+
+```{r}
+set.seed(3)
+
+# Calculate bray curtis distance matrix with all_scale because it has all samples sans the blank 
+all16_bray <- phyloseq::distance(all16_scale, method = "bray") 
+
+# make a data frame from the sample_data and have to use all which is the data with blank removed
+all16df <- data.frame(sample_data(all16s))
+
+# Adonis test
+adonis(all16_bray ~ Location, data = all16df)
+
+# Homogeneity of dispersion test
+beta16_all <- betadisper(all16_bray, all16df$Location)
+permutest(beta16_all)
+```
+
+It looks like there is a differences in community centroids based on sampling location. However, I want to do this for just the soil as well.
+
+```{r}
+set.seed(3)
+
+# Calculate bray curtis distance matrix with soil_scale because it has only the soil samples
+soil16_bray <- phyloseq::distance(soil16_scale, method = "bray") 
+
+# make a data frame from the sample_data and have to use which is the data with just soils 
+soil16df <- data.frame(sample_data(soilbact2))
+
+# Adonis test
+adonis(soil16_bray ~ Location, data = soil16df)
+
+# Homogeneity of dispersion test
+beta16soil <- betadisper(soil16_bray, soil16df$Location)
+permutest(beta16soil)
+```
+
+And there is still a significant difference in between the soil communities.
+
+#### Alpha Diversity:
+
+First, I must perform rarefaction, although rarefaction has its issues, this needs to be done for these metrics.
+
+```{r}
+min_lib <- min(sample_sums(all16s))
+
+#the minimum library is 74 with all samples, which is too small 
+
+min_lib2 <- min(sample_sums(soilbact2))
+
+#if we don't include the swabs, this makes it so the min library size is 26,318 
+
+#I also want to seperate out just the swabs 
+skinbact <- subset_samples(bact.noncontam, Source == 'Skin')
+skinbact2 <- subset_samples(skinbact, Stage != 'Void ')
+
+min_lib3 <- min(sample_sums(skinbact2))
+#same as min library one, 74, which means the soils and swabs must be processed seperately
+```
+
+Making arefaction curves:
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(bact.noncontam)
+
+OTUtab16s <- otu_table(bact.noncontam) 
+class(OTUtab16s) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+OTUtab16s <- t(OTUtab16s) # transpose observations to row
+```
+
+```{r}
+#rareify 
+rare16S <- rarecurve(OTUtab16s, step = 100)
+```
+
+```{r}
+#piping data from rarecurve into ggplot 
+map_dfr(rare16S, bind_rows) %>%
+  bind_cols(SampleID = rownames(OTUtab16s),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_lib, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("Original16SRarePlot.pdf", width=8, height=5)
+```
+
+As we can see, this needs to be redone with the soil and the skin swab libraries separate. Time to rarefy soil samples:
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(soilbact2)
+soil16stab <- otu_table(soilbact2)
+class(soil16stab) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+soil16stab <- t(soil16stab) # transpose observations to rows
+```
+
+```{r}
+soil16srare <- rarecurve(soil16stab, step = 100)
+```
+
+```{r}
+#piping data from rarecurve into ggplot 
+map_dfr(soil16srare, bind_rows) %>%
+  bind_cols(SampleID = rownames(soil16stab),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_lib2, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("raresoil16plot.pdf", width=8, height=5)
+```
+
+```{r}
+# Initialize matrices to store richness and evenness estimates for all of the samples for statistical analysis and visualization 
+soil16bact <- subset_samples(soilbact, Stage != 'Void ')
+
+
+nsoilsamp = nsamples(soil16bact)
+soiltrials = 100
+
+soilrichness <- matrix(nrow = nsoilsamp, ncol = soiltrials)
+row.names(soilrichness) <- sample_names(soil16bact)
+
+soilevenness <- matrix(nrow = nsoilsamp, ncol = soiltrials)
+row.names(soilevenness) <- sample_names(soil16bact)
+
+soilshanmeas <- matrix(nrow = nsoilsamp, ncol = soiltrials)
+row.names(soilshanmeas) <- sample_names(soil16bact)
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(4)
+
+for (i in 1:100) {
+  # Subsample
+  rs <- rarefy_even_depth(soil16bact, sample.size = min_lib2, verbose = FALSE, replace = TRUE)
+  
+  # Calculate richness
+  richsoil <- as.numeric(as.matrix(estimate_richness(rs, measures = "Observed")))
+  soilrichness[ ,i] <- richsoil
+  
+  # Calculate evenness
+  evensoil <- as.numeric(as.matrix(estimate_richness(rs, measures = "InvSimpson")))
+  soilevenness[ ,i] <- evensoil
+
+  #calc Shannon
+  Shannonsoil <- as.numeric(as.matrix(estimate_richness(rs, measures = "Shannon")))
+  soilshanmeas[ ,i] <- Shannonsoil
+}
+
+# Create a new dataframe to hold the means and standard deviations of richness estimates
+SampleID <- row.names(soilrichness)
+mean <- apply(soilrichness, 1, mean)
+sd <- apply(soilrichness, 1, sd)
+measure <- rep("Richness", nsoilsamp)
+rich_stats_soil <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(soilevenness)
+mean <- apply(soilevenness, 1, mean)
+sd <- apply(soilevenness, 1, sd)
+measure <- rep("Inverse Simpson", nsoilsamp)
+even_stats_soil <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(soilshanmeas)
+mean <- apply(soilshanmeas, 1, mean)
+sd <- apply(soilshanmeas, 1, sd)
+measure <- rep("Shannon", nsoilsamp)
+shan_stats_soil <- data.frame(SampleID, mean, sd, measure)
+```
+
+```{r}
+#Now we will combine our estimates for soil richness and evenness into one dataframe
+
+soilalpha <- rbind(rich_stats_soil, even_stats_soil, shan_stats_soil)
+
+#add metadata 
+
+j <- data.frame(sample_data(soil16bact))
+colnames(j)[2] <- "SampleID"
+adivsoil <- merge(soilalpha, j, by = "SampleID")
+```
+
+```{r}
+#filter out the data for this test 
+
+ObRichSl <-filter(adivsoil,measure == "Richness")
+ShannonSl <-filter(adivsoil,measure == "Shannon")
+InvSimpSl <- filter(adivsoil,measure == "Inverse Simpson")
+```
+
+```{r}
+ObRichSl$Stage <- factor(ObRichSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ObRichSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Observed Richness") +
+  xlab("Decomposition Stage") +
+   scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+  stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 3200) +
+    theme_classic() +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sObsSoilRichness.pdf", width=8, height=5)
+```
+
+```{r}
+soilrichaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = ObRichSl)
+summary(soilrichaov) #see if there is a difference between alpha diversity in different sample types and the repeated measures introducing the error is Stage 
+#There is no significant difference in observed richness
+```
+
+```{r}
+compare_means(mean ~ Location, ObRichSl, method = "t.test", paired = FALSE, group.by = "Stage")
+
+#holm adjustment, no diff at different timepoints 
+```
+
+```{r}
+ShannonSl$Stage <- factor(ShannonSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ShannonSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Shannon Diversity") +
+   xlab("Decomposition Stage") +
+     scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+    coord_cartesian(ylim = c(0, 8)) +
+  stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 8) +
+    theme_classic() +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sShannonSoil.pdf", width=8, height=5)
+```
+
+```{r}
+soilshanaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = ShannonSl)
+summary(soilshanaov) 
+#There is no significant difference in shannon diversity 
+```
+
+```{r}
+compare_means(mean ~ Location, ShannonSl , method = "t.test", paired = FALSE, group.by = "Stage")
+
+#holm adjustment, diff at advanced 1 (0.025 *)
+```
+
+```{r}
+InvSimpSl$Stage <- factor(InvSimpSl$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = InvSimpSl, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Inverse Simpson") +
+  xlab("Decomposition Stage") +
+   scale_fill_manual(values = c("grey", "blue")) +
+     labs(fill = 'Treatment') +
+     coord_cartesian(ylim = c(0, 350)) +
+  stat_compare_means(group.by = "Stage", method = "t.test", paired = FALSE, label = "p.signif",  label.y = 350) +
+    theme_classic() +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sInvSimpsonSoil.pdf", width=8, height=5)
+```
+
+```{r}
+soilinvsimaov <- aov(mean~factor(Location)+Error(factor(Stage)), data = InvSimpSl)
+summary(soilinvsimaov) 
+#There is a significant difference in Inverse Simpson diversity metrics based on location (0.000395)
+```
+
+```{r}
+compare_means(mean ~ Location, InvSimpSl, method = "t.test", paired = FALSE, group.by = "Stage")
+
+#holm adjustment, (0.047 * at advanced III and 0.022 * at skeletal I)
+```
+
+Now I need to do a separate rarefaction for the skin swabs.
+
+```{r}
+#to make the rarefaction curve, need to extract otu table 
+taxa_are_rows(skinbact2)
+```
+
+```{r}
+skintab <- otu_table(skinbact2)
+class(skintab) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+skintab <- t(skintab) # transpose observations to rows
+```
+
+```{r}
+skin16srare <- rarecurve(skintab, step = 100)
+```
+
+```{r}
+map_dfr(skin16srare, bind_rows) %>%
+  bind_cols(SampleID = rownames(skintab),.) %>%
+  pivot_longer(-SampleID) %>%
+  drop_na() %>%
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+  select(-name) %>%
+ ggplot(aes(x=n_seqs, y=value, group=SampleID, color=SampleID)) +
+  geom_vline(xintercept=min_lib3, color="gray") +
+  geom_line() +
+  labs(x="Sample Size", y="Species") +
+  theme_classic() +
+  theme(legend.position = "none") 
+ggsave("rareskin16plot.pdf", width=8, height=5)
+```
+
+```{r}
+# Initialize matrices to store richness and evenness estimates for all of the samples
+skin16bact <- subset_samples(skinbact, Stage != 'Void ')
+
+
+nskinsamp = nsamples(skin16bact)
+skintrials = 100
+
+skinrichness <- matrix(nrow = nskinsamp, ncol = skintrials)
+row.names(skinrichness) <- sample_names(skin16bact)
+
+skinevenness <- matrix(nrow = nskinsamp, ncol = skintrials)
+row.names(skinevenness) <- sample_names(skin16bact)
+
+skinshanmeas <- matrix(nrow = nskinsamp, ncol = skintrials)
+row.names(skinshanmeas) <- sample_names(skin16bact)
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(5)
+
+for (i in 1:100) {
+  # Subsample
+  rsk <- rarefy_even_depth(skin16bact, sample.size = min_lib3, verbose = FALSE, replace = TRUE)
+  
+  # Calculate richness
+  richskin <- as.numeric(as.matrix(estimate_richness(rsk, measures = "Observed")))
+  skinrichness[ ,i] <- richskin
+  
+  # Calculate evenness
+  evenskin <- as.numeric(as.matrix(estimate_richness(rsk, measures = "InvSimpson")))
+  skinevenness[ ,i] <- evenskin
+
+  #calc Shannon
+  Shannonskin <- as.numeric(as.matrix(estimate_richness(rsk, measures = "Shannon")))
+  skinshanmeas[ ,i] <- Shannonskin
+}
+
+# Create a new dataframe to hold the means and standard deviations of richness estimates
+SampleID <- row.names(skinrichness)
+mean <- apply(skinrichness, 1, mean)
+sd <- apply(skinrichness, 1, sd)
+measure <- rep("Richness", nskinsamp)
+rich_stats_skin <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(skinevenness)
+mean <- apply(skinevenness, 1, mean)
+sd <- apply(skinevenness, 1, sd)
+measure <- rep("Inverse Simpson", nskinsamp)
+even_stats_skin <- data.frame(SampleID, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleID <- row.names(skinshanmeas)
+mean <- apply(skinshanmeas, 1, mean)
+sd <- apply(skinshanmeas, 1, sd)
+measure <- rep("Shannon", nskinsamp)
+shan_stats_skin <- data.frame(SampleID, mean, sd, measure)
+```
+
+```{r}
+#Now we will combine our estimates for skin richness and evenness into one dataframe
+
+skinalpha <- rbind(rich_stats_skin, even_stats_skin, shan_stats_skin)
+
+#add metadata 
+
+q <- data.frame(sample_data(skin16bact))
+colnames(q)[2] <- "SampleID"
+adivskin <- merge(skinalpha, q, by = "SampleID")
+```
+
+```{r}
+#filter out the data for this test 
+
+ObRichSk <-filter(adivskin,measure == "Richness")
+ShannonSk <-filter(adivskin,measure == "Shannon")
+InvSimpSk <- filter(adivskin,measure == "Inverse Simpson")
+```
+
+```{r}
+ObRichSk$Stage <- factor(ObRichSk$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ObRichSk, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Observed Richness") +
+  xlab("Decomposition Stage") +
+  scale_fill_manual(values = "goldenrod") +
+    theme_classic()+
+ theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sObsSkinRichness.pdf", width=8, height=5)
+```
+
+```{r}
+skinrichaov <- aov(mean~Stage, data=ObRichSk)
+summary(skinrichaov)
+
+#significant difference accross time points (0.0257)
+```
+
+```{r}
+ShannonSk$Stage <- factor(ShannonSk$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = ShannonSk, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Shannon Diversity") +
+   xlab("Decomposition Stage") +
+   scale_fill_manual(values = "goldenrod") +
+  coord_cartesian(ylim=c(0,5)) +
+    theme_classic() +
+  theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sShannonSkin.pdf", width=8, height=5)
+```
+
+```{r}
+skinshanaov <- aov(mean~Stage, data=ShannonSk)
+summary(skinshanaov)
+
+#not significant but borderline (0.0532)
+```
+
+```{r}
+InvSimpSk$Stage <- factor(InvSimpSk$Stage, levels = c("Early", "Bloat", "Active I", "Active II", "Active III ", "Advanced I", "Advanced II", "Advanced III", "Skeletal I ", "Skeletal II"))
+
+ggplot(data = InvSimpSk, aes(y = mean, x = Stage, fill = Location)) +
+  geom_boxplot() +  
+  ylab("Inverse Simpson") +
+  xlab("Decomposition Stage") +
+   scale_fill_manual(values = "goldenrod") +
+  coord_cartesian(ylim = c(0,90)) +
+    theme_classic() +
+  theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1, size = 14), axis.title.x = element_text(size = 16), axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16)) 
+ggsave("16sInvSimpsonSkin.pdf", width=8, height=5)
+```
+
+```{r}
+skinsimpaov <- aov(mean~Stage, data=InvSimpSk)
+summary(skinsimpaov)
+
+#significant difference (0.0194)
+```
