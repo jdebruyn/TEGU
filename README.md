@@ -1,5 +1,5 @@
 <h3>The materials in this repository are associated with the following manuscript:</h3> 
-Hannah L. Noel, Hannah M. Maddox, Owen J. Singleton, Stephanie K. Drumheller, Jennifer M. DeBruyn. “Persistence of tegu lizard skin during decomposition selects for a unique fungal decomposer community” (in prep)
+Hannah L. Noel, Hannah M. Maddox, Owen J. Singleton, Stephanie K. Drumheller, Jennifer M. DeBruyn. “Persistence of tegu lizard skin during decomposition selects for a unique fungal decomposer community” (in submission)
 
 <h3>Below is a list of folders and explanations of the files within each:</h3>
 
@@ -15,7 +15,7 @@ This folder contains the shared and taxonomy files from both the 16S rRNA and IT
 **R_Analysis:** <br>
 This folder contains the metadata as a .csv that is needed for all chemical and sequencing data analysis, along with R code. <br>
 
-- "Tegu_FinalMetadata.csv”:Metadata file that is needed for all chemical and sequencing data analysis. 
+- "Tegu_FinalMetadata.csv”: Metadata file that is needed for all chemical and sequencing data analysis. 
 - “Tegu_Chemical_Data_Analysis”: R file with code for statistical analysis and data visualization of soil chemical parameters. Metadata file needed. 
 - “miseqR.R”: Contains functions to normalize and scale sequence data and allow for tests like adonis to be performed on phyloseq objects. Originally created by the Denef Lab (http://deneflab.github.io/MicrobeMiseq) 
 - “16S_ClusteredAnalysis”: Quarto documents that has code for analysis of 16S rRNA data. Metadata, shared, taxonomy, and miseqR files needed for analysis. 
